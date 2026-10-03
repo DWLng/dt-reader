@@ -70,6 +70,11 @@ footer button:disabled{color:var(--dim);opacity:.4}
 #ttsVoice{flex:1;background:var(--bg);border:1px solid var(--line);border-radius:8px;color:var(--ink);padding:8px 10px;font-size:13px;max-width:100%}
 #ttsPitch{flex:1}
 .ttsTip{font-size:11px;color:var(--dim);line-height:1.7;margin-top:2px}
+#ttsBar{position:fixed;left:0;right:0;bottom:calc(var(--ft) + env(safe-area-inset-bottom));height:46px;display:flex;align-items:center;gap:4px;background:var(--panel);border-top:1px solid var(--line);padding:0 6px;z-index:33;max-width:680px;margin:0 auto;box-shadow:0 -4px 16px rgba(0,0,0,.2)}
+#ttsBar[hidden]{display:none}
+#tbPlay,#tbExpand,#tbStop{background:none;border:none;color:var(--ink);font-size:17px;padding:10px 12px;cursor:pointer;font-family:inherit}
+#tbStop{color:var(--dim)}
+#tbTitle{flex:1;font-size:13px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
 </style>
 </head>
 <body>
@@ -99,6 +104,10 @@ footer button:disabled{color:var(--dim);opacity:.4}
   <div id="tocList"></div>
 </div></div>
 <div id="ttsSheet">
+  <div class="ttsRow" style="justify-content:space-between;margin-bottom:6px">
+    <b style="font-size:14px">听书</b>
+    <button class="tt" id="ttsCollapse">收起 ▾</button>
+  </div>
   <div class="ttsRow">
     <button class="tt big" id="ttsPlay">▶ 从当前阅读位置开始听</button>
     <button class="tt" id="ttsStopBtn">⏹</button>
@@ -108,8 +117,15 @@ footer button:disabled{color:var(--dim);opacity:.4}
   </div></div>
   <div class="ttsRow"><label>音色</label><select id="ttsVoice"></select></div>
   <div class="ttsRow"><label>语调</label><input type="range" id="ttsPitch" min="0.7" max="1.3" step="0.05" value="1"></div>
-  <div class="ttsRow"><label>连播</label><input type="checkbox" id="ttsAuto" checked> <span style="font-size:12px;color:var(--dim)">本章读完自动进入下一章</span></div>
-  <div class="ttsTip">朗读从当前阅读位置开始，正在读的句子会加亮并自动滚动跟随（边听边读）；智能按句读断句，句末标点停顿更久。音色取决于设备语音包——iPhone：设置 → 辅助功能 → 朗读内容 → 声音，可下载更自然的中文语音。</div>
+  <div class="ttsRow"><label>连播</label><input type="checkbox" id="ttsAuto" checked> <span style="font-size:12px;color:var(--dim)">本章读完自动进入下一章；收起面板后照常播放</span></div>
+  <div class="ttsRow"><label>跟随</label><input type="checkbox" id="ttsFollow" checked> <span style="font-size:12px;color:var(--dim)">正在读的句子加亮并自动滚动</span></div>
+  <div class="ttsTip">朗读从当前阅读位置开始；收起面板后由底部迷你播放条控制，不遮挡阅读、播放不中断，点标题跳回正在听的章节。想要更自然有感情的语音：iPhone 到 设置 → 辅助功能 → 朗读内容 → 声音，下载「Siri」或「增强」版中文语音。本页按短句分组朗读，保留标点自然停顿。</div>
+</div>
+<div id="ttsBar" hidden>
+  <button id="tbPlay">⏸</button>
+  <div id="tbTitle"></div>
+  <button id="tbExpand">☰</button>
+  <button id="tbStop">✕</button>
 </div>
 <div id="toast"></div>
 <script>
@@ -136,7 +152,6 @@ function toast(msg){ const t = $('#toast'); t.textContent = msg; t.style.display
   clearTimeout(t._h); t._h = setTimeout(()=>t.style.display='none', 1600); }
 
 function render(i, keepY){
-  if (TTS.on && !TTS._auto) ttsStop(false);
   cur = Math.max(0, Math.min(E.length-1, i));
   const e = E[cur];
   $('#cTitle').textContent = chTitle(e);
@@ -163,7 +178,7 @@ function render(i, keepY){
   if (!keepY) scrollTo(0,0);
   drawBar(); buildToc();
 }
-function go(d){ if (TTS.on) ttsStop(false);
+function go(d){
   if (d<0 && cur===0){ toast('已是第一章'); return; }
   if (d>0 && cur===E.length-1){ toast('已是最后一章'); return; }
   render(cur+d); }
@@ -213,8 +228,9 @@ function setTheme(t){ document.documentElement.dataset.theme = t;
   document.querySelector('meta[name=theme-color]').content = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim(); }
 $('#btnTheme').onclick = ()=>{ const t = THEMES[(THEMES.indexOf(document.documentElement.dataset.theme)+1)%3];
   setTheme(t); toast('主题: ' + ({dark:'夜',paper:'纸',green:'青'})[t]); };
-/* ── 听书 TTS（设备自带语音合成）── */
-const TTS = { on:false, paused:false, idx:0, sents:[], timer:null, _skip:false, _auto:false };
+/* ── 听书 TTS v2（番茄式：分组朗读+句级跟随+迷你播放条）── */
+const TTS = { on:false, paused:false, gi:0, sents:[], groups:[], timer:null, estTimer:null,
+              _skip:false, _auto:false, playingN:null, _gStart:0, _gAnchor:0, _gRate:1, _gK:0, follow:true };
 function splitSentences(t){
   const out = []; let buf = '';
   for (const ch of t){ buf += ch; if ('。！？；…'.includes(ch)){ out.push(buf); buf = ''; } }
@@ -235,58 +251,106 @@ function ttsFillVoices(){
 }
 if ('speechSynthesis' in window){ speechSynthesis.onvoiceschanged = ttsFillVoices; ttsFillVoices(); }
 function collectSents(){ return [...document.querySelectorAll('#cBody .sent')].map(el=>({el, t: el.textContent})); }
+function buildGroups(sents){
+  const chunks = []; let cur = [], len = 0;
+  for (const snt of sents){
+    if (cur.length && (len >= 120 || (len >= 50 && /[。！？…]/.test(cur[cur.length-1].t.trim().slice(-1))))){ chunks.push(cur); cur = []; len = 0; }
+    cur.push(snt); len += snt.t.length;
+  }
+  if (cur.length) chunks.push(cur);
+  return chunks.map(g=>{
+    let off = 0; const offs = g.map(snt=>{ const o = off; off += snt.t.length; return o; });
+    return { sents:g, text:g.map(snt=>snt.t).join(''), offs, base:TTS.sents.indexOf(g[0]),
+             strong: /[。！？…]/.test(g[g.length-1].t.trim().slice(-1)) };
+  });
+}
 function ttsClearHl(){ document.querySelectorAll('.sent.speaking').forEach(el=>el.classList.remove('speaking')); }
+function hlSent(i){
+  const snt = TTS.sents[i]; if (!snt) return;
+  ttsClearHl(); snt.el.classList.add('speaking');
+  if (snt.el.isConnected && TTS.follow){
+    const r = snt.el.getBoundingClientRect();
+    if (r.top < 70 || r.bottom > innerHeight - 130) snt.el.scrollIntoView({block:'center', behavior:'smooth'});
+  }
+}
+function chTitleByN(n){ const e = E.find(x=>x.n===n); return e ? (e.orig ? `第${e.orig}章${e.title?' '+e.title:''}` : e.title) : ''; }
 function ttsMarkBtn(){
   $('#ttsPlay').textContent = TTS.on ? (TTS.paused ? '▶ 继续' : '⏸ 暂停') : '▶ 从当前阅读位置开始听';
   $('#ttsPlay').classList.toggle('playing', TTS.on && !TTS.paused);
   $('#btnTts').classList.toggle('playing', TTS.on && !TTS.paused);
+  $('#ttsBar').hidden = !TTS.on;
+  $('#art').style.paddingBottom = TTS.on ? 'calc(var(--ft) + env(safe-area-inset-bottom) + 92px)' : '';
+  if (TTS.on){ $('#tbPlay').textContent = TTS.paused ? '▶' : '⏸';
+    $('#tbTitle').textContent = chTitleByN(TTS.playingN) + (TTS.paused ? '（已暂停）' : ''); }
 }
 function ttsStart(){
+  if(!('speechSynthesis' in window)){ toast('本设备浏览器不支持听书'); return; }
   TTS.sents = collectSents();
   if(!TTS.sents.length){ toast('本章无可朗读内容'); return; }
-  if(!TTS.paused){
-    let st = 0;
-    for(let i=0;i<TTS.sents.length;i++){ if(TTS.sents[i].el.getBoundingClientRect().bottom > 60){ st = i; break; } }
-    TTS.idx = st;
-  }
+  TTS.playingN = E[cur].n; TTS.follow = localStorage.getItem('ct_follow') !== '0';
+  let st = 0;
+  for(let i=0;i<TTS.sents.length;i++){ if(TTS.sents[i].el.getBoundingClientRect().bottom > 60){ st = i; break; } }
+  TTS.groups = buildGroups(TTS.sents);
+  TTS.gi = 0;
+  for (let k=0;k<TTS.groups.length;k++){ const g = TTS.groups[k];
+    if (st >= g.base && st < g.base + g.sents.length){ TTS.gi = k; break; } }
   TTS.on = true; TTS.paused = false;
-  ttsMarkBtn(); ttsSpeak();
+  ttsMarkBtn(); ttsSpeakGroup();
 }
-function isInView(el){ const r = el.getBoundingClientRect(); return r.top > 60 && r.bottom < innerHeight - 90; }
-function ttsSpeak(){
+function ttsSpeakGroup(){
   if(!TTS.on || TTS.paused) return;
-  if(TTS.idx >= TTS.sents.length){
-    if(localStorage.getItem('ct_auto') !== '0' && cur < E.length - 1){
-      TTS._auto = true; render(cur+1); TTS._auto = false;
-      setTimeout(()=>{ TTS.sents = collectSents(); TTS.idx = 0; ttsSpeak(); }, 450);
+  if(TTS.gi >= TTS.groups.length){
+    if(localStorage.getItem('ct_auto') !== '0'){
+      const idx = E.findIndex(x=>x.n===TTS.playingN);
+      if (idx >= 0 && idx < E.length-1){
+        TTS._auto = true; render(idx+1); TTS._auto = false;
+        TTS.playingN = E[idx+1].n;
+        setTimeout(()=>{ TTS.sents = collectSents(); TTS.groups = buildGroups(TTS.sents); TTS.gi = 0; ttsMarkBtn(); ttsSpeakGroup(); }, 450);
+      } else { ttsStop(true); toast('全书听完'); }
     } else { ttsStop(true); toast('本章听完'); }
     return;
   }
-  const s = TTS.sents[TTS.idx];
-  ttsClearHl(); s.el.classList.add('speaking');
-  if(!isInView(s.el)) s.el.scrollIntoView({block:'center', behavior:'smooth'});
-  const u = new SpeechSynthesisUtterance(s.t);
+  const g = TTS.groups[TTS.gi];
+  TTS._gK = -1; TTS._gStart = performance.now(); TTS._gAnchor = 0;
+  TTS._gRate = parseFloat(localStorage.getItem('ct_rate')||'1');
+  hlSent(g.base);
+  clearInterval(TTS.estTimer);
+  TTS.estTimer = setInterval(()=>{
+    if (!TTS.on || TTS.paused) return;
+    const chars = TTS._gAnchor + (performance.now() - TTS._gStart)/1000 * 4.3 * TTS._gRate;
+    let k = 0;
+    for (let j=0;j<g.offs.length;j++){ if (chars >= g.offs[j]) k = j; }
+    if (k !== TTS._gK){ TTS._gK = k; hlSent(g.base + k); }
+  }, 300);
+  const u = new SpeechSynthesisUtterance(g.text);
   const vn = localStorage.getItem('ct_voice');
   const v = ttsVoices().find(x=>x.voiceURI===vn);
   if(v) u.voice = v;
-  u.rate = parseFloat(localStorage.getItem('ct_rate')||'1');
+  u.rate = TTS._gRate;
   u.pitch = parseFloat(localStorage.getItem('ct_pitch')||'1');
+  u.onboundary = (e)=>{ if (!TTS.on || TTS.paused) return;
+    TTS._gAnchor = e.charIndex || 0; TTS._gStart = performance.now();
+    let k = 0;
+    for (let j=0;j<g.offs.length;j++){ if (TTS._gAnchor >= g.offs[j]) k = j; }
+    if (k !== TTS._gK){ TTS._gK = k; hlSent(g.base + k); }
+  };
   u.onend = ()=>{ if(TTS._skip){ TTS._skip = false; return; }
+    clearInterval(TTS.estTimer);
     if(!TTS.on || TTS.paused) return;
-    TTS.idx++;
-    const last = s.t.trim().slice(-1);
-    const gap = '！？。'.includes(last) ? 320 : 180;
-    TTS.timer = setTimeout(ttsSpeak, gap);
+    TTS.gi++;
+    TTS.timer = setTimeout(ttsSpeakGroup, g.strong ? 120 : 320);
   };
   u.onerror = ()=>{ if(TTS._skip){ TTS._skip = false; return; }
+    clearInterval(TTS.estTimer);
     if(!TTS.on || TTS.paused) return;
-    TTS.idx++; TTS.timer = setTimeout(ttsSpeak, 120);
+    TTS.gi++; TTS.timer = setTimeout(ttsSpeakGroup, 120);
   };
   speechSynthesis.speak(u);
 }
-function ttsPause(){ TTS.paused = true; clearTimeout(TTS.timer); speechSynthesis.cancel(); ttsMarkBtn(); }
+function ttsPause(){ TTS.paused = true; clearTimeout(TTS.timer); clearInterval(TTS.estTimer); speechSynthesis.cancel(); ttsMarkBtn(); }
 function ttsStop(closeSheet){
-  TTS.on = false; TTS.paused = false; clearTimeout(TTS.timer); TTS._skip = true; speechSynthesis.cancel();
+  TTS.on = false; TTS.paused = false; TTS.playingN = null;
+  clearTimeout(TTS.timer); clearInterval(TTS.estTimer); TTS._skip = true; speechSynthesis.cancel();
   ttsClearHl(); ttsMarkBtn();
   if(closeSheet) $('#ttsSheet').classList.remove('open');
 }
@@ -297,23 +361,33 @@ $('#btnTts').onclick = ()=>{
   if(willOpen){ ttsFillVoices();
     if(!('speechSynthesis' in window)) toast('本设备浏览器不支持听书'); }
 };
+$('#ttsCollapse').onclick = ()=> $('#ttsSheet').classList.remove('open');
 $('#ttsPlay').onclick = ()=>{
   if(!('speechSynthesis' in window)){ toast('本设备浏览器不支持听书'); return; }
-  if(TTS.on && !TTS.paused){ ttsPause(); return; }
-  ttsStart();
+  if(TTS.on && TTS.playingN === E[cur].n){
+    if(!TTS.paused){ ttsPause(); } else { TTS.paused = false; ttsMarkBtn(); ttsSpeakGroup(); }
+  } else {
+    if(TTS.on){ TTS._skip = true; clearTimeout(TTS.timer); clearInterval(TTS.estTimer); speechSynthesis.cancel(); }
+    ttsStart();
+  }
 };
 $('#ttsStopBtn').onclick = ()=> ttsStop(true);
+$('#tbPlay').onclick = ()=> $('#ttsPlay').onclick();
+$('#tbStop').onclick = ()=> ttsStop(true);
+$('#tbExpand').onclick = ()=>{ $('#ttsSheet').classList.add('open'); ttsFillVoices(); };
+$('#tbTitle').onclick = ()=>{ const idx = E.findIndex(x=>x.n===TTS.playingN); if(idx>=0 && E[cur].n!==TTS.playingN) render(idx); };
 document.querySelectorAll('#ttsRates button').forEach(b=> b.onclick = ()=>{
   localStorage.setItem('ct_rate', b.dataset.r);
   document.querySelectorAll('#ttsRates button').forEach(x=>x.classList.toggle('on', x===b));
-  if(TTS.on && !TTS.paused){ TTS._skip = true; speechSynthesis.cancel(); setTimeout(ttsSpeak, 120); }
+  if(TTS.on && !TTS.paused){ TTS._skip = true; speechSynthesis.cancel(); setTimeout(ttsSpeakGroup, 150); }
 });
 $('#ttsVoice').onchange = ()=>{
   localStorage.setItem('ct_voice', $('#ttsVoice').value);
-  if(TTS.on && !TTS.paused){ TTS._skip = true; speechSynthesis.cancel(); setTimeout(ttsSpeak, 150); }
+  if(TTS.on && !TTS.paused){ TTS._skip = true; speechSynthesis.cancel(); setTimeout(ttsSpeakGroup, 150); }
 };
 $('#ttsPitch').oninput = ()=> localStorage.setItem('ct_pitch', $('#ttsPitch').value);
 $('#ttsAuto').onchange = ()=> localStorage.setItem('ct_auto', $('#ttsAuto').checked ? '1' : '0');
+$('#ttsFollow').onchange = ()=>{ localStorage.setItem('ct_follow', $('#ttsFollow').checked ? '1' : '0'); TTS.follow = $('#ttsFollow').checked; };
 /* 进度记忆 */
 let _sv = 0;
 addEventListener('scroll', ()=>{ drawBar();
@@ -328,6 +402,7 @@ const _savedRate = localStorage.getItem('ct_rate')||'1';
 document.querySelectorAll('#ttsRates button').forEach(b=>b.classList.toggle('on', b.dataset.r===_savedRate));
 $('#ttsPitch').value = localStorage.getItem('ct_pitch')||'1';
 $('#ttsAuto').checked = localStorage.getItem('ct_auto') !== '0';
+$('#ttsFollow').checked = localStorage.getItem('ct_follow') !== '0';
 let start = 0;
 const hm = location.hash.match(/^#n(\d+)$/);
 if (hm){ const k = E.findIndex(e=>e.n===+hm[1]); if (k>=0) start = k; }
